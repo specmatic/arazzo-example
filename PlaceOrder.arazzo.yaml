@@ -1,0 +1,144 @@
+arazzo: "1.2.0"
+info:
+  title: "Arazzo Workflow"
+  version: "1.0.0"
+  x-contact:
+    name: Specmatic
+    url: https://specmatic.io
+    email: devs@specmatic.io
+  x-generated-by: Specmatic Studio v1.28.4
+sourceDescriptions:
+- name: "LocationProto"
+  url: "./grpc/location/v1/location.proto"
+  type: "protobuf"
+- name: "ProductGraphQL"
+  url: "./graphql/product.graphqls"
+  type: "graphql"
+- name: "AsyncOrderApi"
+  url: "./asyncapi/order.yaml"
+  type: "asyncapi"
+- name: "WarehouseApi"
+  url: "./openapi/warehouse.yaml"
+  type: "openapi"
+- name: "OrderApi"
+  url: "./openapi/order.yaml"
+  type: "openapi"
+workflows:
+- workflowId: "PlaceOrder"
+  inputs:
+    required:
+    - "GetUserLocation"
+    - "createOrderSend"
+    type: "object"
+    properties:
+      createOrderSend:
+        required:
+        - "requestId"
+        type: "object"
+        properties:
+          requestId:
+            type: "string"
+            format: "uuid"
+      GetUserLocation:
+        required:
+        - "userEmail"
+        type: "object"
+        properties:
+          userEmail:
+            type: "string"
+            format: "email"
+  steps:
+  - stepId: "GetUserLocation"
+    requestBody:
+      payload:
+        userEmail: "$inputs.GetUserLocation.userEmail"
+    successCriteria:
+    - condition: "$response.status#/code == 0"
+    outputs:
+      userId: "$response.body#/userId"
+      locationCode: "$response.body#/locationCode"
+    rpcMethod: "$sourceDescriptions.LocationProto.location.v1.LocationService/GetUserLocation"
+    rpcProtocol: "grpc"
+  - stepId: "products"
+    parameters:
+    - name: "locationCode"
+      in: "variable"
+      value: "$steps.GetUserLocation.outputs.locationCode"
+    successCriteria:
+    - condition: "$response.body.errors[0] == null"
+    onSuccess:
+    - name: "productsIsArrayEmpty"
+      type: "end"
+      criteria:
+      - condition: "$response.body#/data/products/0 == null"
+    outputs:
+      productId: "$response.body#/data/products/0/productId"
+      inventory: "$response.body#/data/products/0/inventory"
+    graphqlOperation:
+      schema: "$sourceDescriptions.ProductGraphQL"
+      operation: |
+        query ($locationCode: String!) {
+          products(locationCode: $locationCode) {
+            productId
+            inventory
+          }
+        }
+  - stepId: "createOrderSend"
+    parameters:
+    - name: "requestId"
+      in: "header"
+      value: "$inputs.createOrderSend.requestId"
+    requestBody:
+      payload:
+        userId: "$steps.GetUserLocation.outputs.userId"
+        productId: "$steps.products.outputs.productId"
+        inventory: "$steps.products.outputs.inventory"
+    outputs:
+      requestId: "$message.header.requestId"
+    operationId: "$sourceDescriptions.AsyncOrderApi.createOrder"
+    action: "send"
+  - stepId: "createOrderReceive"
+    timeout: 6000
+    outputs:
+      orderId: "$message.payload.orderId"
+    operationId: "$sourceDescriptions.AsyncOrderApi.createOrder"
+    correlationId: "$steps.createOrderSend.outputs.requestId"
+    action: "receive"
+  - stepId: "reserveInventory"
+    dependsOn:
+    - "createOrderReceive"
+    parameters:
+    - name: "orderId"
+      in: "query"
+      value: "$steps.createOrderReceive.outputs.orderId"
+    successCriteria:
+    - condition: "$statusCode == 200"
+    operationId: "$sourceDescriptions.WarehouseApi.reserveInventory"
+  - stepId: "orderAccepted"
+    timeout: 6000
+    operationId: "$sourceDescriptions.AsyncOrderApi.orderAccepted"
+    correlationId: "$steps.createOrderSend.outputs.requestId"
+    action: "receive"
+  - stepId: "outForDelivery"
+    dependsOn:
+    - "createOrderReceive"
+    parameters:
+    - name: "requestId"
+      in: "header"
+      value: "$steps.createOrderSend.outputs.requestId"
+    requestBody:
+      payload:
+        orderId: "$steps.createOrderReceive.outputs.orderId"
+    operationId: "$sourceDescriptions.AsyncOrderApi.outForDelivery"
+    action: "send"
+  - stepId: "getOrderDetails"
+    dependsOn:
+    - "createOrderReceive"
+    parameters:
+    - name: "orderId"
+      in: "path"
+      value: "$steps.createOrderReceive.outputs.orderId"
+    successCriteria:
+    - condition: "$statusCode == 200"
+    operationId: "$sourceDescriptions.OrderApi.getOrderDetails"
+components: {}
